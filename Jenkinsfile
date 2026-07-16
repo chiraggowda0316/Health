@@ -2,11 +2,7 @@ pipeline {
     agent any
 
     environment {
-        // ASSIGNMENT CONFIGURATION - Flat tag targeting local machine verification
-        DOCKER_REGISTRY   = "localhost"
         DOCKER_IMAGE_NAME = "task-tracker"
-        
-        // Build tracking parameters
         BUILD_TAG         = "build-${BUILD_NUMBER}"
         PREVIOUS_TAG      = "build-${BUILD_NUMBER.toInteger() - 1}"
     }
@@ -21,7 +17,6 @@ pipeline {
         stage('Install Dependencies & Test') {
             steps {
                 echo 'Building an isolated test image context and running validation suites...'
-                // Builds up to the target builder environment layer and executes its test scripts directly
                 sh "docker build --target builder -t ${DOCKER_IMAGE_NAME}:test ."
                 sh "docker run --rm ${DOCKER_IMAGE_NAME}:test npm test"
             }
@@ -30,18 +25,16 @@ pipeline {
         stage('Build Image') {
             steps {
                 echo "Compiling clean multi-stage production container tagged: ${BUILD_TAG}"
-                sh "docker build --build-arg BUILDKIT_INLINE_CACHE=1 -t ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${BUILD_TAG} ."
+                sh "docker build -t ${DOCKER_IMAGE_NAME}:${BUILD_TAG} ."
             }
         }
 
         stage('Deploy') {
             steps {
-                echo 'Orchestrating container deployment strategy via native Docker execution...'
+                echo 'Orchestrating container deployment strategy...'
                 sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
                 sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
-                
-                // Spin up the runtime environment matching assigned requirements
-                sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
+                sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
             }
         }
 
@@ -49,7 +42,7 @@ pipeline {
             steps {
                 echo 'Evaluating service status metrics via a dynamic readiness verification loop...'
                 script {
-                    def maxAttempts = 10
+                    def maxAttempts = 6
                     def attempt = 0
                     def isReady = false
                     
@@ -64,7 +57,12 @@ pipeline {
                         } catch (Exception e) {
                             echo "Application server process starting up, waiting..."
                         }
-                        if (!isReady) { sh "sleep 3" }
+                        if (!isReady) { 
+                            // CRITICAL DEBUG: Print the logs during the loop to see why it fails to connect!
+                            echo "--- LIVE APP CRASH LOG TRACKER (Attempt ${attempt}) ---"
+                            sh "docker logs ${DOCKER_IMAGE_NAME}-app || true"
+                            sh "sleep 4" 
+                        }
                     }
                     
                     if (!isReady) {
@@ -90,12 +88,12 @@ pipeline {
             echo 'Pipeline successfully passed and deployed!'
         }
         failure {
-            echo "Deployment anomalies detected. Reverting back to previous working tag: ${PREVIOUS_TAG}"
+            echo "Deployment anomalies detected. Reverting back to previous working tag: build-${PREVIOUS_TAG}"
             script {
                 try {
                     sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
                     sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
-                    sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${PREVIOUS_TAG}"
+                    sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_IMAGE_NAME}:${PREVIOUS_TAG}"
                     echo "Rollback completed successfully."
                 } catch (Exception e) {
                     echo "Rollback strategy terminated: No previous valid working tags identified."

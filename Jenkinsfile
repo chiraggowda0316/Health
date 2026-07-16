@@ -50,7 +50,8 @@ pipeline {
                         attempt++
                         echo "Readiness loop evaluation check #${attempt}/${maxAttempts}..."
                         try {
-                            def response = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/health", returnStdout: true).trim()
+                            // Changed target endpoint path to route out to the host machine interface
+                            def response = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://172.17.0", returnStdout: true).trim()
                             if (response == "200") {
                                 isReady = true
                             }
@@ -58,9 +59,6 @@ pipeline {
                             echo "Application server process starting up, waiting..."
                         }
                         if (!isReady) { 
-                            // CRITICAL DEBUG: Print the logs during the loop to see why it fails to connect!
-                            echo "--- LIVE APP CRASH LOG TRACKER (Attempt ${attempt}) ---"
-                            sh "docker logs ${DOCKER_IMAGE_NAME}-app || true"
                             sh "sleep 4" 
                         }
                     }
@@ -71,9 +69,9 @@ pipeline {
                 }
                 
                 echo 'Printing assignment expected multi-endpoint verification outputs:'
-                sh 'curl -s http://localhost:3000/'
-                sh 'curl -s http://localhost:3000/health'
-                sh 'curl -s http://localhost:3000/api/tasks'
+                sh 'curl -s http://172.17.0'
+                sh 'curl -s http://172.17.0'
+                sh 'curl -s http://172.17.0api/tasks'
             }
         }
     }
@@ -88,11 +86,12 @@ pipeline {
             echo 'Pipeline successfully passed and deployed!'
         }
         failure {
-            echo "Deployment anomalies detected. Reverting back to previous working tag: build-${PREVIOUS_TAG}"
+            echo "Deployment anomalies detected. Reverting back to previous working tag: ${PREVIOUS_TAG}"
             script {
                 try {
                     sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
                     sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
+                    // Fixed string reference notation to correctly state build tracking numbers
                     sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_IMAGE_NAME}:${PREVIOUS_TAG}"
                     echo "Rollback completed successfully."
                 } catch (Exception e) {

@@ -2,12 +2,11 @@ pipeline {
     agent any
 
     environment {
-        // ASSIGNMENT CONFIGURATION - Match these to your actual secure private endpoints
-        DOCKER_REGISTRY   = "://domain.com"
+        // ASSIGNMENT CONFIGURATION - Flat tag targeting local machine verification
+        DOCKER_REGISTRY   = "localhost"
         DOCKER_IMAGE_NAME = "task-tracker"
-        REGISTRY_CREDS    = "private-registry-credentials-id"
         
-        // Build tracking and rollback parameters
+        // Build tracking parameters
         BUILD_TAG         = "build-${BUILD_NUMBER}"
         PREVIOUS_TAG      = "build-${BUILD_NUMBER.toInteger() - 1}"
     }
@@ -21,31 +20,28 @@ pipeline {
 
         stage('Install Dependencies & Test') {
             steps {
-                echo 'Executing application validation suites inside an isolated Node.js container...'
-                // Explicitly uses npm install to support workspaces without an existing package-lock file
-                sh "docker run --rm -v \$(pwd):/app -w /app node:20-alpine sh -c 'npm install && npm test'"
+                echo 'Building an isolated test image context and running validation suites...'
+                // Builds up to the target builder environment layer and executes its test scripts directly
+                sh "docker build --target builder -t ${DOCKER_IMAGE_NAME}:test ."
+                sh "docker run --rm ${DOCKER_IMAGE_NAME}:test npm test"
             }
         }
 
         stage('Build Image') {
             steps {
-                echo "Compiling optimized multi-stage image tagged: ${BUILD_TAG}"
+                echo "Compiling clean multi-stage production container tagged: ${BUILD_TAG}"
                 sh "docker build --build-arg BUILDKIT_INLINE_CACHE=1 -t ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${BUILD_TAG} ."
-                
-                echo "Publishing container image to private registry destination..."
-                withCredentials([usernamePassword(credentialsId: "${REGISTRY_CREDS}", usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
-                    sh "docker login -u ${REG_USER} -p ${REG_PASS} ${DOCKER_REGISTRY}"
-                    sh "docker push ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
-                }
             }
         }
 
         stage('Deploy') {
             steps {
-                echo 'Orchestrating container deployment strategy via Docker Compose...'
-                // Cleans up legacy builds and dangling application instances safely
-                sh "docker-compose down --remove-orphans || docker compose down --remove-orphans || true"
-                sh "export DOCKER_REGISTRY=${DOCKER_REGISTRY} DOCKER_IMAGE_NAME=${DOCKER_IMAGE_NAME} BUILD_TAG=${BUILD_TAG} && (docker-compose up -d || docker compose up -d)"
+                echo 'Orchestrating container deployment strategy via native Docker execution...'
+                sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
+                sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
+                
+                // Spin up the runtime environment matching assigned requirements
+                sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
             }
         }
 
@@ -86,20 +82,21 @@ pipeline {
 
     post {
         always {
-            echo 'Pruning legacy dangling images and freeing workspace environment resource chunks...'
+            echo 'Pruning legacy dangling images and freeing workspace environments...'
             sh 'docker image prune -f || true'
             cleanWs()
         }
         success {
             echo 'Pipeline successfully passed and deployed!'
-            // Optional: slackSend(color: '#00FF00', message: "SUCCESSFUL: Build #${env.BUILD_NUMBER} is live.")
         }
         failure {
-            echo "Deployment anomalies detected. Initializing rollback state sequence to: ${PREVIOUS_TAG}"
+            echo "Deployment anomalies detected. Reverting back to previous working tag: ${PREVIOUS_TAG}"
             script {
                 try {
-                    sh "export DOCKER_REGISTRY=${DOCKER_REGISTRY} DOCKER_IMAGE_NAME=${DOCKER_IMAGE_NAME} BUILD_TAG=${PREVIOUS_TAG} && (docker-compose up -d || docker compose up -d)"
-                    echo "Rollback sequence completed successfully."
+                    sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
+                    sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
+                    sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${PREVIOUS_TAG}"
+                    echo "Rollback completed successfully."
                 } catch (Exception e) {
                     echo "Rollback strategy terminated: No previous valid working tags identified."
                 }

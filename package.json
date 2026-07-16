@@ -3,10 +3,8 @@
   "version": "1.0.0",
   "description": "Starter assignment project for freshers using Jenkins and Docker",
   "main": "app.js",
- "scripts": {
-  "test": "node --test *.test.js"
-}
-
+  "scripts": {
+    "test": "node --test *.test.js"
   },
   "keywords": [
     "jenkins",

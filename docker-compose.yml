@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  task-tracker:
+    # Resolves from variable environment parameters injected dynamically by Jenkins
+    image: ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${BUILD_TAG}
+    container_name: task-tracker-app
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    networks:
+      - pipeline-network
+
+networks:
+  pipeline-network:
+    driver: bridge
+

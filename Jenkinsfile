@@ -31,34 +31,43 @@ pipeline {
 
         stage('Deploy') {
             steps {
-                echo 'Orchestrating container deployment strategy via Host Network...'
+                echo 'Orchestrating container deployment strategy...'
                 sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
                 sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
                 
-                // Using --network host exposes port 3000 directly to the Jenkins environment context
-                sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app --network host ${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
+                // Deploying with standard bridge port mapping
+                sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
             }
         }
 
         stage('Curl Verification') {
             steps {
-                echo 'Evaluating service status metrics via host network routing...'
+                echo 'Evaluating service status metrics by resolving direct container IP...'
                 script {
                     def maxAttempts = 6
                     def attempt = 0
                     def isReady = false
+                    def containerIp = ""
+                    
+                    // Fetch the internal container IP dynamically from the docker engine
+                    containerIp = sh(script: "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${DOCKER_IMAGE_NAME}-app", returnStdout: true).trim()
+                    echo "Targeting Container Internal IP Address: ${containerIp}"
+                    
+                    if (containerIp == "") {
+                        error "Could not resolve valid IP for container ${DOCKER_IMAGE_NAME}-app"
+                    }
                     
                     while (attempt < maxAttempts && !isReady) {
                         attempt++
                         echo "Readiness loop evaluation check #${attempt}/${maxAttempts}..."
                         try {
-                            // Can now look natively at localhost port 3000 directly
-                            def response = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://127.0.0", returnStdout: true).trim()
+                            // Direct curl mapping targeting the precise internal container socket
+                            def response = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://${containerIp}:3000/health", returnStdout: true).trim()
                             if (response == "200") {
                                 isReady = true
                             }
                         } catch (Exception e) {
-                            echo "Waiting for app service connectivity..."
+                            echo "Waiting for container endpoint response..."
                         }
                         if (!isReady) { 
                             sh "sleep 4" 
@@ -66,14 +75,16 @@ pipeline {
                     }
                     
                     if (!isReady) {
+                        echo "--- PRINTS LIVE LOGS ON FINAL FAILURE CONTEXT ---"
+                        sh "docker logs ${DOCKER_IMAGE_NAME}-app || true"
                         error "Application health verification phase failed (Connection Timeout)."
                     }
+                    
+                    echo 'Printing assignment expected multi-endpoint verification outputs:'
+                    sh "curl -s http://${containerIp}:3000/"
+                    sh "curl -s http://${containerIp}:3000/health"
+                    sh "curl -s http://${containerIp}:3000/api/tasks"
                 }
-                
-                echo 'Printing assignment expected multi-endpoint verification outputs:'
-                sh "curl -s http://127.0.0"
-                sh "curl -s http://127.0.0"
-                sh "curl -s http://127.0.0api/tasks"
             }
         }
     }
@@ -93,7 +104,7 @@ pipeline {
                 try {
                     sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
                     sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
-                    sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app --network host ${DOCKER_IMAGE_NAME}:${PREVIOUS_TAG}"
+                    sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_IMAGE_NAME}:${PREVIOUS_TAG}"
                     echo "Rollback completed successfully."
                 } catch (Exception e) {
                     echo "Rollback strategy terminated: No previous valid working tags identified."

@@ -2,29 +2,28 @@
 FROM node:20-alpine AS builder
 WORKDIR /usr/src/app
 
-# Leverage layer caching for dependencies by copying package files first
+# Cache dependencies
 COPY package*.json ./
 RUN npm install
 
-# Copy the remaining application source files
+# Copy all repository source components
 COPY . .
 
-# Stage 2: Minimal Secure Runtime
+# Stage 2: Secure Production Runtime
 FROM node:20-alpine
 WORKDIR /usr/src/app
 
-# Enforce production environment optimization flags
 ENV NODE_ENV=production
 
-# Copy only production dependencies and source components from the builder stage
-COPY --from=builder /usr/src/app/package*.json ./
+# Copy built dependency layer modules
 COPY --from=builder /usr/src/app/node_modules ./node_modules
-COPY --from=builder /usr/src/app/app.js ./
 
-# Drop root capabilities: Run application processes as low-privilege node user
+# COPY ALL source files instead of just a single file to prevent missing component crashes
+COPY --from=builder /usr/src/app/ ./
+
+# Enforce secure non-root context execution
 USER node
 
-# Expose default application communication port
 EXPOSE 3000
 
 CMD ["node", "app.js"]

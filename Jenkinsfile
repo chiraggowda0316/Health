@@ -1,18 +1,13 @@
 pipeline {
     agent any
 
-    tools {
-        // Requires NodeJs Plugin configuration matching named target
-        nodejs 'node'
-    }
-
     environment {
-        // Configure these to match your actual secure private endpoints
+        // Task requirements
         DOCKER_REGISTRY   = "://domain.com"
         DOCKER_IMAGE_NAME = "task-tracker"
         REGISTRY_CREDS    = "private-registry-credentials-id"
         
-        // Setup build tracking identifiers
+        // Build tracking
         BUILD_TAG         = "build-${BUILD_NUMBER}"
         PREVIOUS_TAG      = "build-${BUILD_NUMBER.toInteger() - 1}"
     }
@@ -26,16 +21,16 @@ pipeline {
 
         stage('Install Dependencies & Test') {
             steps {
-                echo 'Running package installations and verification scripts...'
-                sh 'npm install'
-                sh 'npm test'
+                echo 'Running tests inside an isolated Node.js Docker container...'
+                // Mounts the directory to run npm install and test inside a clean container
+                sh "docker run --rm -v \$(pwd):/app -w /app node:20-alpine sh -c 'npm ci && npm test'"
             }
         }
 
-        stage('Build & Push Image') {
+        stage('Build Image') {
             steps {
-                echo "Compiling secure image tagged: ${BUILD_TAG}"
-                sh "docker build -t ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${BUILD_TAG} ."
+                echo "Building secure image tagged: ${BUILD_TAG}"
+                sh "docker build --build-arg BUILDKIT_INLINE_CACHE=1 -t ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${BUILD_TAG} ."
                 
                 echo "Publishing build to private registry..."
                 withCredentials([usernamePassword(credentialsId: "${REGISTRY_CREDS}", usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
@@ -45,17 +40,18 @@ pipeline {
             }
         }
 
-        stage('Deploy Infrastructure') {
+        stage('Deploy') {
             steps {
                 echo 'Deploying application via Docker Compose...'
-                sh "docker-compose down --remove-orphans || true"
-                sh "docker-compose up -d"
+                // Handles backward compatibility for legacy docker-compose binaries if needed
+                sh "docker-compose down --remove-orphans || docker compose down --remove-orphans || true"
+                sh "export DOCKER_REGISTRY=${DOCKER_REGISTRY} DOCKER_IMAGE_NAME=${DOCKER_IMAGE_NAME} BUILD_TAG=${BUILD_TAG} && (docker-compose up -d || docker compose up -d)"
             }
         }
 
-        stage('Readiness & Verification') {
+        stage('Curl Verification') {
             steps {
-                echo 'Executing loop verification targeting application endpoints...'
+                echo 'Executing loop verification targeting application health endpoint...'
                 script {
                     def maxAttempts = 10
                     def attempt = 0
@@ -68,20 +64,19 @@ pipeline {
                             def response = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/health", returnStdout: true).trim()
                             if (response == "200") {
                                 isReady = true
-                                echo "Application health endpoint is responsive!"
                             }
                         } catch (Exception e) {
-                            echo "Waiting for service connectivity..."
+                            echo "Waiting for app to start..."
                         }
                         if (!isReady) { sh "sleep 3" }
                     }
                     
                     if (!isReady) {
-                        error "Application health verification check failed timed out."
+                        error "Application health verification check timed out."
                     }
                 }
                 
-                echo 'Printing system endpoint verification payloads:'
+                echo 'Printing assignment expected verification payloads:'
                 sh 'curl -s http://localhost:3000/'
                 sh 'curl -s http://localhost:3000/health'
                 sh 'curl -s http://localhost:3000/api/tasks'
@@ -96,20 +91,19 @@ pipeline {
             cleanWs()
         }
         success {
-            slackSend(color: '#00FF00', message: "SUCCESSFUL: Job '${env.JOB_NAME}' [Build #${env.BUILD_NUMBER}] completed successfully.")
+            echo 'Pipeline completed successfully! Sending notifications...'
+            // Optional: slackSend(color: '#00FF00', message: "SUCCESSFUL: ${env.JOB_NAME} [Build #${env.BUILD_NUMBER}]")
         }
         failure {
-            slackSend(color: '#FF0000', message: "FAILED: Job '${env.JOB_NAME}' [Build #${env.BUILD_NUMBER}] broken. Initializing automatic rollback actions...")
-            echo "Executing rollback strategies deploying target: ${PREVIOUS_TAG}"
+            echo "Deployment failed! Reverting back to previous working tag: ${PREVIOUS_TAG}"
             script {
                 try {
-                    sh "export BUILD_TAG=${PREVIOUS_TAG} && docker-compose up -d"
-                    echo "Rollback sequence completed successfully."
+                    sh "export DOCKER_REGISTRY=${DOCKER_REGISTRY} DOCKER_IMAGE_NAME=${DOCKER_IMAGE_NAME} BUILD_TAG=${PREVIOUS_TAG} && (docker-compose up -d || docker compose up -d)"
+                    echo "Rollback completed successfully."
                 } catch (Exception e) {
-                    echo "Rollback failed. Please check host deployment logs."
+                    echo "Rollback failed. Please check host deployment manually."
                 }
             }
         }
     }
 }
-

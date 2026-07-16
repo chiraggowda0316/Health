@@ -33,13 +33,9 @@ pipeline {
         stage('Deploy') {
             steps {
                 echo 'Orchestrating container deployment strategy...'
-                // Ensure custom network bridge exists
                 sh "docker network create ${NETWORK_NAME} || true"
-                
                 sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
                 sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
-                
-                // Mount container straight onto the custom network bridge
                 sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app --network ${NETWORK_NAME} -p 3000:3000 ${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
             }
         }
@@ -48,7 +44,7 @@ pipeline {
             steps {
                 echo 'Evaluating service status metrics via a dynamic readiness verification loop...'
                 script {
-                    def maxAttempts = 8
+                    def maxAttempts = 5
                     def attempt = 0
                     def isReady = false
                     
@@ -56,15 +52,16 @@ pipeline {
                         attempt++
                         echo "Readiness loop evaluation check #${attempt}/${maxAttempts}..."
                         try {
-                            // Spin up an internal curl runner directly inside the custom network bridge to bypass host network walls
                             def response = sh(script: "docker run --rm --network ${NETWORK_NAME} alpine:3.19 curl -s -o /dev/null -w '%{http_code}' http://${DOCKER_IMAGE_NAME}-app:3000/health", returnStdout: true).trim()
                             if (response == "200") {
                                 isReady = true
                             }
                         } catch (Exception e) {
-                            echo "Application server process starting up, waiting..."
+                            echo "Application server process failed to connect. Fetching crash reason..."
                         }
                         if (!isReady) { 
+                            echo "--- CRASH DUMP FROM RUNNING CONTAINER (Attempt ${attempt}) ---"
+                            sh "docker logs ${DOCKER_IMAGE_NAME}-app || true"
                             sh "sleep 4" 
                         }
                     }

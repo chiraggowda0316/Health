@@ -2,6 +2,7 @@ pipeline {
     agent any
 
     environment {
+        NETWORK_NAME      = "pipeline-network"
         DOCKER_IMAGE_NAME = "task-tracker"
         BUILD_TAG         = "build-${BUILD_NUMBER}"
         PREVIOUS_TAG      = "build-${BUILD_NUMBER.toInteger() - 1}"
@@ -32,9 +33,14 @@ pipeline {
         stage('Deploy') {
             steps {
                 echo 'Orchestrating container deployment strategy...'
+                // Ensure custom network bridge exists
+                sh "docker network create ${NETWORK_NAME} || true"
+                
                 sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
                 sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
-                sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
+                
+                // Mount container straight onto the custom network bridge
+                sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app --network ${NETWORK_NAME} -p 3000:3000 ${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
             }
         }
 
@@ -42,7 +48,7 @@ pipeline {
             steps {
                 echo 'Evaluating service status metrics via a dynamic readiness verification loop...'
                 script {
-                    def maxAttempts = 6
+                    def maxAttempts = 8
                     def attempt = 0
                     def isReady = false
                     
@@ -50,8 +56,8 @@ pipeline {
                         attempt++
                         echo "Readiness loop evaluation check #${attempt}/${maxAttempts}..."
                         try {
-                            // Changed target endpoint path to route out to the host machine interface
-                            def response = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://172.17.0", returnStdout: true).trim()
+                            // Spin up an internal curl runner directly inside the custom network bridge to bypass host network walls
+                            def response = sh(script: "docker run --rm --network ${NETWORK_NAME} alpine:3.19 curl -s -o /dev/null -w '%{http_code}' http://${DOCKER_IMAGE_NAME}-app:3000/health", returnStdout: true).trim()
                             if (response == "200") {
                                 isReady = true
                             }
@@ -69,9 +75,9 @@ pipeline {
                 }
                 
                 echo 'Printing assignment expected multi-endpoint verification outputs:'
-                sh 'curl -s http://172.17.0'
-                sh 'curl -s http://172.17.0'
-                sh 'curl -s http://172.17.0api/tasks'
+                sh "docker run --rm --network ${NETWORK_NAME} alpine:3.19 curl -s http://${DOCKER_IMAGE_NAME}-app:3000/"
+                sh "docker run --rm --network ${NETWORK_NAME} alpine:3.19 curl -s http://${DOCKER_IMAGE_NAME}-app:3000/health"
+                sh "docker run --rm --network ${NETWORK_NAME} alpine:3.19 curl -s http://${DOCKER_IMAGE_NAME}-app:3000/api/tasks"
             }
         }
     }
@@ -91,8 +97,7 @@ pipeline {
                 try {
                     sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
                     sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
-                    // Fixed string reference notation to correctly state build tracking numbers
-                    sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app -p 3000:3000 ${DOCKER_IMAGE_NAME}:${PREVIOUS_TAG}"
+                    sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app --network ${NETWORK_NAME} -p 3000:3000 ${DOCKER_IMAGE_NAME}:${PREVIOUS_TAG}"
                     echo "Rollback completed successfully."
                 } catch (Exception e) {
                     echo "Rollback strategy terminated: No previous valid working tags identified."

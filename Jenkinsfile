@@ -2,7 +2,6 @@ pipeline {
     agent any
 
     environment {
-        NETWORK_NAME      = "pipeline-network"
         DOCKER_IMAGE_NAME = "task-tracker"
         BUILD_TAG         = "build-${BUILD_NUMBER}"
         PREVIOUS_TAG      = "build-${BUILD_NUMBER.toInteger() - 1}"
@@ -32,19 +31,20 @@ pipeline {
 
         stage('Deploy') {
             steps {
-                echo 'Orchestrating container deployment strategy...'
-                sh "docker network create ${NETWORK_NAME} || true"
+                echo 'Orchestrating container deployment strategy via Host Network...'
                 sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
                 sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
-                sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app --network ${NETWORK_NAME} -p 3000:3000 ${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
+                
+                // Using --network host exposes port 3000 directly to the Jenkins environment context
+                sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app --network host ${DOCKER_IMAGE_NAME}:${BUILD_TAG}"
             }
         }
 
         stage('Curl Verification') {
             steps {
-                echo 'Evaluating service status metrics via a dynamic readiness verification loop...'
+                echo 'Evaluating service status metrics via host network routing...'
                 script {
-                    def maxAttempts = 5
+                    def maxAttempts = 6
                     def attempt = 0
                     def isReady = false
                     
@@ -52,16 +52,15 @@ pipeline {
                         attempt++
                         echo "Readiness loop evaluation check #${attempt}/${maxAttempts}..."
                         try {
-                            def response = sh(script: "docker run --rm --network ${NETWORK_NAME} alpine:3.19 curl -s -o /dev/null -w '%{http_code}' http://${DOCKER_IMAGE_NAME}-app:3000/health", returnStdout: true).trim()
+                            // Can now look natively at localhost port 3000 directly
+                            def response = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://127.0.0", returnStdout: true).trim()
                             if (response == "200") {
                                 isReady = true
                             }
                         } catch (Exception e) {
-                            echo "Application server process failed to connect. Fetching crash reason..."
+                            echo "Waiting for app service connectivity..."
                         }
                         if (!isReady) { 
-                            echo "--- CRASH DUMP FROM RUNNING CONTAINER (Attempt ${attempt}) ---"
-                            sh "docker logs ${DOCKER_IMAGE_NAME}-app || true"
                             sh "sleep 4" 
                         }
                     }
@@ -72,9 +71,9 @@ pipeline {
                 }
                 
                 echo 'Printing assignment expected multi-endpoint verification outputs:'
-                sh "docker run --rm --network ${NETWORK_NAME} alpine:3.19 curl -s http://${DOCKER_IMAGE_NAME}-app:3000/"
-                sh "docker run --rm --network ${NETWORK_NAME} alpine:3.19 curl -s http://${DOCKER_IMAGE_NAME}-app:3000/health"
-                sh "docker run --rm --network ${NETWORK_NAME} alpine:3.19 curl -s http://${DOCKER_IMAGE_NAME}-app:3000/api/tasks"
+                sh "curl -s http://127.0.0"
+                sh "curl -s http://127.0.0"
+                sh "curl -s http://127.0.0api/tasks"
             }
         }
     }
@@ -94,7 +93,7 @@ pipeline {
                 try {
                     sh "docker stop ${DOCKER_IMAGE_NAME}-app || true"
                     sh "docker rm ${DOCKER_IMAGE_NAME}-app || true"
-                    sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app --network ${NETWORK_NAME} -p 3000:3000 ${DOCKER_IMAGE_NAME}:${PREVIOUS_TAG}"
+                    sh "docker run -d --name ${DOCKER_IMAGE_NAME}-app --network host ${DOCKER_IMAGE_NAME}:${PREVIOUS_TAG}"
                     echo "Rollback completed successfully."
                 } catch (Exception e) {
                     echo "Rollback strategy terminated: No previous valid working tags identified."
